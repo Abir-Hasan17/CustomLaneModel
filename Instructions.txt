@@ -1,0 +1,239 @@
+Dataset facts
+CULane = 133,235 frames. Splits: 88,880 train / 9,675 val / 34,680 test. Images are 1640 × 590. Test set is split into one normal category and eight challenging categories (crowded, night, no-line, shadow, arrow, dazzle light, curve, crossroad). (xingangpan.github.io)
+ CULane evaluation treats each lane as a 30-pixel wide line and uses IoU + F1 (common threshold 0.5). Use the official eval code when possible. (CVF Open Access)
+
+1 — Data ingestion & structure
+Download CULane and keep raw structure: driver_xx_xxframe/, laneseg_label_w16/, list/. Use SCNN toolkit scripts to parse lists. (GitHub)
+
+
+Parse annotations into two target formats and store both:
+
+
+Segmentation masks. Render each annotated spline/polyline to a binary mask with thickness = 30 px (use cv2.polylines or drawSpline + thickness). Save per image. This gives direct supervision for segmentation heads and matches evaluation. (MDPI)
+
+
+Row-anchor / sparse coordinate format. Sample X coordinates at a fixed set of Y rows (row anchors). Store missing values as -1. Row anchors commonly cover Y in the lower half (e.g., 260→530 px, 18 rows) but you can tune. (PMC)
+
+
+Keep metadata files: scene category, video id, frame index for temporal tests.
+
+
+2 — Preprocessing & augmentation
+Resize strategy: keep original 1640×590 for final eval. For training you may use downsampled variants (e.g., 800×288 or 1640×590 depending on GPU). Train at a consistent resolution and validate at eval resolution.
+
+
+ROI crop: remove top sky area. Keep bottom ~60–90% depending on your camera mounting.
+
+
+Convert optional channels: RGB + optional edge/gradient channel (Canny or Sobel) and HLS-V channel. Concatenate extra channels as model input if you want classical priors.
+
+
+Augmentations (apply only on training):
+
+
+Photometric: brightness ±40%, contrast ±30%, color jitter, random gamma.
+
+
+Geometric: small rotation ±5°, scaling 0.9–1.1, translation ±50 px, random perspective/homography (to simulate viewpoint). Do not do horizontal flip (breaks lane semantics).
+
+
+Occlusion simulation: random erasing or boxes to mimic vehicles.
+
+
+Night/fog augmentation for rare categories (color darkening, gaussian blur, haze overlay).
+
+
+Render labels consistently after transforms. For row anchors, re-sample after geometric transforms.
+
+
+3 — Two-track model design (hybrid)
+Provide two interchangeable tracks. You can implement both and compare.
+A. Accuracy track (Segmentation + spatial reasoning)
+Backbone: ResNet-34/ResNet-101 or DLA / ERFNet depending on compute.
+
+
+Neck: FPN or simple upsampling decoder.
+
+
+Spatial module: SCNN (slice-by-slice message passing) to capture long continuous lane structure.
+
+
+Heads: (1) binary lane segmentation (one channel per lane class or instance mask), (2) optional instance embedding or Hough/line parameter regression head.
+
+
+Losses: BCE + Dice (seg), embedding discriminative loss if instance head, smoothing loss for continuity. (arXiv)
+
+
+B. Real-time / compact track (Anchor / row-based)
+Backbone: ResNet-18 or MobileNet for speed.
+
+
+Head: Row-anchor or anchor-based lane regression (UFLD or LaneATT style). Predict sparse X positions per row anchor plus confidence.
+
+
+Losses: cross-entropy (presence), ordinal / classification (UFLD), L1 for coordinate offsets. (arXiv)
+
+
+C. Hybrid (recommended for robustness)
+Single backbone + dual heads: segmentation (global shape) + row-anchor (precise coordinates). Fuse outputs at postprocessing (consensus + confidence weighting). This uses strengths of both methods.
+
+
+4 — Losses and training recipe
+Segmentation: BCE + Dice (or BCE + Focal if heavy class imbalance).
+
+
+Row anchors: CrossEntropy for existence + L1 for coordinate regression when present.
+
+
+Instance embedding: discriminative loss (pull/ push).
+
+
+Combine with weights, e.g. L = λ_seg L_seg + λ_row L_row + λ_emb L_emb. Start with λ_seg=1, λ_row=1, λ_emb=0.1 and tune.
+
+
+Optimizer & schedule:
+
+
+Option A (SGD): SGD momentum 0.9, weight_decay 1e-4, base_lr 0.01 with StepLR or CosineAnnealing.
+
+
+Option B (AdamW): lr 1e-4 → 3e-4 for smaller backbones.
+
+
+Batch size: largest that fits GPU. Use mixed precision (AMP) and distributed training (DDP).
+
+
+Epochs: 20–50 as a baseline. Validate F1 every epoch. Use early stopping on val F1 plateau.
+
+
+Balance training data: oversample minority scenarios (night, no-line) or use targeted augmentation.
+
+
+5 — Validation & evaluation
+Use official CULane evaluation scripts to compute per-category and overall F1 at IoU=0.5. Use the val set to pick the optimal detection confidence threshold. (GitHub)
+
+
+Track precision/recall per category. Report confusion cases: merged lanes, missing lines at intersections, extreme dazzle.
+
+
+6 — Inference pipeline (per frame)
+Load image, apply same ROI crop and normalization used during training.
+
+
+Optionally compute classical edge map and append as channel.
+
+
+Forward pass. Collect segmentation probabilities and row-anchor outputs.
+
+
+Postprocess:
+
+
+Threshold segmentation probabilities (e.g., 0.4–0.6). Morphological opening to remove speckle. Thinning / skeletonize centerlines.
+
+
+For row anchors, filter per-anchor confidence and convert predicted x positions to polylines.
+
+
+Combine: use segmentation masks to validate row anchor predictions. If segmentation and anchors disagree, choose higher confidence; or intersect then fit.
+
+
+Fit cubic spline or 3rd-order polynomial to each lane’s sampled points using RANSAC to remove outliers. Output polyline coordinates in original image coordinates.
+
+
+Output: lane polylines, per-lane confidence, lane type/visibility flag.
+
+
+7 — Temporal smoothing & tracking (video)
+For video, smooth lane polynomials across frames via:
+
+
+Kalman filter on polynomial coefficients or
+
+
+Exponential moving average on sampled X coordinates (alpha 0.6).
+
+
+Track lane IDs via simple Hungarian matching using IoU or centerline distance. Preserve ID when occluded for N frames.
+
+
+8 — Post-processing classical refinements (hybrid advantage)
+Use Canny+Hough to recover long straight segments when segmentation is weak.
+
+
+If a lane is partially predicted, use line extension heuristics toward vanishing point.
+
+
+Use road geometry constraint: parallelism and continuity priors to reject outliers.
+
+
+9 — Ablation & experiment plan (for your report)
+Baseline 1: SCNN segmentation only.
+
+
+Baseline 2: UFLD / row-anchor only.
+
+
+Hybrid: segmentation + row-anchor fusion.
+
+
+Ablate: with/without edge channel; with/without SCNN; different backbones (ResNet-18 vs ResNet-50).
+
+
+Metrics: overall F1 and per-category F1. Measure FPS on target hardware.
+
+
+10 — Deployment & deliverables
+Export best model to ONNX and TorchScript. Quantize to FP16/INT8 for edge.
+
+
+Provide: training scripts, inference script, evaluate.py that uses official CULane eval, README, and a short demo video/GIF with overlay.
+
+
+Recommended libs: PyTorch, OpenCV, Albumentations, NumPy, SciPy, tensorboard/Weights & Biases.
+
+
+11 — Project structure (suggested)
+/project
+  /data/CULane/ (raw)
+  /data/processed/masks/ (30px masks)
+  /src/
+    dataset.py
+    transforms.py
+    models/
+      scnn_model.py
+      uflf_model.py
+      hybrid_head.py
+    train.py
+    infer.py
+    evaluate.py
+  /experiments/
+  README.md
+
+12 — Minimal baseline hyperparameters (start point)
+Backbone: ResNet-18 (fast) / ResNet-34 (balance).
+
+
+Input: 1640×590 or 800×288 for faster runs.
+
+
+Optimizer: SGD, lr=0.01, momentum=0.9, wd=1e-4.
+
+
+Batch size: 4–8 per GPU (adjust to memory).
+
+
+Epochs: 30.
+
+
+Augment: brightness ±0.4, rotate ±5°, scale 0.9–1.1, random erasing 0.02–0.2 area.
+
+
+References / starting code
+CULane official page & dataset details. (xingangpan.github.io)
+
+
+SCNN (spatial CNN) + CULane toolkit (data layout + eval). (GitHub)
+
+
+UFLD (Ultra-Fast) and LaneATT papers for row-anchor/anchor designs. (arXiv)

@@ -1,0 +1,37 @@
+seed: 42
+output_dir: ./experiments/hybrid_r18
+
+# Data
+culane_root: ./data/CULane
+mask_root: ./data/processed/masks
+row_label_root: ./data/processed/row_labels
+train_list: ./data/CULane/list/train.txt
+val_list: ./data/CULane/list/val.txt
+img_height: 288 # train resolution; switch to 590 for full-res training
+img_width: 800
+keep_aspect: false
+roi_top_ratio: 0.1 # keep bottom 90%
+row_anchors: ./src/configs/row_anchors_590.yml
+x_bins: 200
+
+# Optimization
+optimizer: sgd
+lr: 0.01
+momentum: 0.9
+weight_decay: 1.0e-4
+batch_size: 8
+num_workers: 4
+epochs: 30
+amp: true
+
+# Model
+backbone: resnet18
+track: hybrid # segmentation | row | hybrid
+lambda_seg: 1.0
+lambda_row: 1.0
+lambda_emb: 0.0
+
+# Logging
+log_interval: 50
+val_interval: 1
+save_top_k: 3

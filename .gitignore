@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+
+# Data
+data/
+/data/CULane/
+/data/processed/
+/experiments/
+/external/
